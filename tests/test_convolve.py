@@ -1,31 +1,48 @@
 import numpy as np
+from itertools import product
 from numpy.testing import assert_allclose, assert_equal
 
-from invert3des.convolve import R3_to_P3 as response_shift
+from invert3des import convolve
 
 
-def test_response_shift():
-    A = np.arange(5 ** 3).reshape((5, 5, 5))
-    B = response_shift(A)
-    L = A.shape[0]
-    for i in range(L):
-        for j in range(L):
-            for k in range(L):
-                assert_allclose(A[i, (i + j) % L, (i + j + k) % L],
-                                B[i, j, k])
+class TrivialPulseTests(object):
+    def test_default_pulses(self):
+        B = convolve.R3_to_P3(self.A, trim=True, include_margin=False)
+        assert_equal(self.A, B)
 
-def test_response_shift_enlarge():
-    A0 = np.arange(5 ** 3).reshape((5, 5, 5))
-    A = response_enlarge(A0)
-    B = response_shift_enlarge(A0)
-    L = A.shape[0]
-    for i in range(L):
-        for j in range(L):
-            for k in range(L):
-                assert_allclose(A[i, i + j, i + j + k], B[i, j, k])
+    def test_same_pulses(self):
+        B = convolve.R3_to_P3(self.A, E_all=((0, 1, 0), (0, 1, 0), (0, 1, 0)),
+                              trim=True, include_margin=False)
+        assert_equal(self.A, B)
+
+    def test_different_pulses_asc(self):
+        B = convolve.R3_to_P3(self.A, ((0, 1, 0), (0, 0, 1, 0, 0),
+                                       (0, 0, 0, 0, 1, 0, 0, 0, 0)),
+                              trim=True, include_margin=False)
+        assert_equal(self.A, B)
+
+    def test_different_pulses_desc(self):
+        B = convolve.R3_to_P3(self.A, ((0, 0, 0, 0, 1, 0, 0, 0, 0),
+                                       (0, 0, 1, 0, 0), (0, 1, 0)),
+                              trim=True, include_margin=False)
+        assert_equal(self.A, B)
 
 
-def test_inverse_response_shift():
-    A = np.arange(5 ** 3).reshape((5, 5, 5))
-    assert_allclose(A, inverse_response_shift(response_shift(A)))
+class TestTrivialPulses1(TrivialPulseTests):
+    def setUp(self):
+        self.A = (1 + np.arange(5 ** 3)).reshape((5, 5, 5))
 
+
+class TestTrivialPulses2(TrivialPulseTests):
+    def setUp(self):
+        self.A = (1 + np.arange(4 * 5 * 6)).reshape((4, 5, 6))
+
+
+def test_shift_all():
+    A = (1 + np.arange(2 * 4 * 6)).reshape((2, 4, 6))
+    B = convolve.shift_all(A, trim=False)
+    C = np.zeros_like(A)
+    for i, j, k in product(*map(xrange, A.shape)):
+        if (i + j) < A.shape[1] and (i + j + k) < A.shape[2]:
+            C[i, j, k] = A[i, i + j, i + j + k]
+    assert_equal(B, C)
