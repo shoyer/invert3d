@@ -4,7 +4,7 @@ from numpy.fft import fft2, fftshift, ifftshift, fftfreq
 from utils import MetaArray
 
 
-def convolve_matrix(pulse_vec, signal_len):
+def convolution_operator(pulse_vec, signal_len, direct_dot_product=True):
     pulse_vec = np.asanyarray(pulse_vec)
     if (len(pulse_vec) % 2) == 0:
         raise ValueError('pulse_vec should have odd length (since the center '
@@ -23,15 +23,26 @@ def convolve_first(R, E1=(1,)):
     """
     dL = len(E1) - 1
     L3, L2, L1 = R.shape
-    S1 = np.zeros((L3, L2, L3 + L2 + L1 + dL), dtype=R.dtype)
-    A = convolve_matrix(E1, L1)
+    S1 = np.zeros((L3, L2, L1 + L2 + L3 + dL), dtype=R.dtype)
+    A = convolution_operator(E1, L1)
     for t3 in xrange(L3):
         for t2 in xrange(L2):
-            x = R[t3, t2, :]
-            start = t3 + t2
-            end = start + L1 + dL
-            S1[t3, t2, start:end] = A.dot(x)
+            S1[t3, t2, (t3 + t2):(t3 + t2 + L1 + dL)] = A.dot(R[t3, t2, :])
     return S1
+
+
+def deconvolve_first(S1, E1=(1,), deconvolution_operator=None):
+    """
+    Deconvolve over t1
+    """
+    dL = len(E1) - 1
+    L3, L2, L1 = S1.shape
+    R = np.zeros((L3, L2, L1 - L2 - L3 - dL), dtype=S1.dtype)
+    Ainv = deconvolution_operator(E1, L1 - dL)
+    for t3 in xrange(L3):
+        for t2 in xrange(L2):
+            R[t3, t2, :] = Ainv.dot(S1[t3, t2, (t3 + t2):(t3 + t2 + L1 + dL)])
+    return R
 
 
 def convolve_second(S1, E2=(1,)):
@@ -40,16 +51,26 @@ def convolve_second(S1, E2=(1,)):
     """
     dL = len(E2) - 1
     L3, L2, L1 = S1.shape
-    S2 = np.zeros((L3, L3 + L2 + dL, L1), dtype=S1.dtype)
-    A = convolve_matrix(E2, L2)
+    S2 = np.zeros((L3, L2 + L3 + dL, L1), dtype=S1.dtype)
+    A = convolution_operator(E2, L2)
     for t3 in xrange(L3):
         for sum12 in xrange(L1):
-            # integrate over t2
-            x = S1[t3, :, sum12]
-            start = t3
-            end = start + L2 + dL
-            S2[t3, start:end, sum12] = A.dot(x)
+            S2[t3, t3:(t3 + L2 + dL), sum12] = A.dot(S1[t3, :, sum12])
     return S2
+
+
+def deconvolve_second(S2, E2=(1,), deconvolution_operator=None):
+    """
+    Deconvolve over t2
+    """
+    dL = len(E2) - 1
+    L3, L2, L1 = S2.shape
+    S1 = np.zeros((L3, L2 - L3 - dL, L1), dtype=S2.dtype)
+    Ainv = deconvolution_operator(E2, L2 - dL)
+    for t3 in xrange(L3):
+        for sum12 in xrange(L1):
+            S1[t3, :, sum12] = Ainv.dot(S2[t3, t3:(t3 + L2 + dL), sum12])
+    return S1
 
 
 def convolve_third(S2, E3=(1,)):
@@ -59,16 +80,32 @@ def convolve_third(S2, E3=(1,)):
     dL = len(E3) - 1
     L3, L2, L1 = S2.shape
     S3 = np.zeros((L3 + dL, L2, L1), dtype=S2.dtype)
-    A = convolve_matrix(E3, L3)
+    A = convolution_operator(E3, L3)
     for sum23 in xrange(L2):
         for T1 in xrange(L1):
-            x = S2[:, sum23, T1]
-            S3[:, sum23, T1] = A.dot(x)
+            S3[:, sum23, T1] = A.dot(S2[:, sum23, T1])
     return S3
 
 
-def shift_all(S3, E_all=((1,), (1,), (1,)), trim=True, include_margin=True):
-    "Shift from indices (T3, T3 + T2, T3 + T2 + T1) to (T3, T2, T1)"
+def deconvolve_third(S3, E3=(1,), deconvolution_operator=None):
+    """
+    Deconvolve over t3
+    """
+    dL = len(E3) - 1
+    L3, L2, L1 = S3.shape
+    S2 = np.zeros((L3 - dL, L2, L1), dtype=S3.dtype)
+    Ainv = deconvolution_operator(E3, L3 - dL)
+    for sum23 in xrange(L2):
+        for T1 in xrange(L1):
+            S2[:, sum23, T1] = Ainv.dot(S3[:, sum23, T1])
+    return S2
+
+
+def shift_time_indices(S3, E_all=((1,), (1,), (1,)), trim=True,
+                       include_margin=True):
+    """
+    Shift indices from (T3, T3 + T2, T3 + T2 + T1) to (T3, T2, T1)
+    """
     P3 = S3.copy()
 
     E3, E2, E1 = E_all
@@ -78,14 +115,14 @@ def shift_all(S3, E_all=((1,), (1,), (1,)), trim=True, include_margin=True):
 
     tau3, tau2, tau1 = (int((len(E) - 1) / 2.0) for E in E_all)
 
-    for T3 in np.arange(S3.shape[0]):
+    for T3 in xrange(S3.shape[0]):
         P3[T3, :, :] = np.roll(P3[T3, :, :], -T3 + tau3, axis=0)
         P3[T3, :, :] = np.roll(P3[T3, :, :], -T3 + tau3, axis=1)
         if T3 > tau3:
             P3[T3, (-T3 + tau3):, :] = 0
             P3[T3, :, (-T3 + tau3):] = 0
 
-    for T2 in np.arange(S3.shape[1]):
+    for T2 in xrange(S3.shape[1]):
         P3[:, T2, :] = np.roll(P3[:, T2, :], -T2 + tau2, axis=1)
         if T2 > tau2:
             P3[:, T2, (-T2 + tau2):] = 0
@@ -102,6 +139,35 @@ def shift_all(S3, E_all=((1,), (1,), (1,)), trim=True, include_margin=True):
     return P3
 
 
+
+def shift_time_indices_undo(P3, E_all=((1,), (1,), (1,)), trim=True,
+                            include_margin=True):
+    """
+    Shift from indices (T3, T2, T1) to (T3, T3 + T2, T3 + T2 + T1)
+
+    Assumes input from shift_time_indices(trim=True, include_margin=True)
+    """
+    E3, E2, E1 = E_all
+    L3, L2, L1 = (d - len(E) + 1 for E, d in zip(E_all, P3.shape))
+
+    S3 = np.zeros((L3 + len(E3) - 1,
+                   L3 + L2 + len(E3) - 1,
+                   L3 + L1 + L1 + len(E1) - 1),
+                  dtype=P3.dtype)
+    S3[:(L3 + len(E3) - 1),
+       :(L2 + len(E2) - 1),
+       :(L1 + len(E1) - 1)] = P3
+
+    tau3, tau2, _ = (int((len(E) - 1) / 2.0) for E in E_all)
+
+    for T2 in xrange(S3.shape[1]):
+        S3[:, T2, :] = np.roll(S3[:, T2, :], T2 - tau2, axis=1)
+    for T3 in xrange(S3.shape[0]):
+        S3[T3, :, :] = np.roll(S3[T3, :, :], T3 - tau3, axis=0)
+        S3[T3, :, :] = np.roll(S3[T3, :, :], T3 - tau3, axis=1)
+    return S3
+
+
 def expand_ticks(R, E_all=((1,), (1,), (1,))):
     ticks_new = []
     for t, Ei in zip(R.ticks, E_all):
@@ -116,7 +182,7 @@ def expand_ticks(R, E_all=((1,), (1,), (1,))):
 
 def R3_to_P3(R, E_all=((1,), (1,), (1,)), trim=True, include_margin=True):
     E3, E2, E1 = E_all
-    P3 = shift_all(
+    P3 = shift_time_indices(
         convolve_third(convolve_second(convolve_first(R, E1), E2), E3),
         E_all, trim, include_margin)
     try:
@@ -125,8 +191,16 @@ def R3_to_P3(R, E_all=((1,), (1,), (1,)), trim=True, include_margin=True):
         return P3
 
 
+def P3_to_R3(P, E_all=((1,), (1,), (1,)), deconvolution_operator=None):
+    E3, E2, E1 = E_all
+    do = deconvolution_operator
+    R3 = deconvolve_first(deconvolve_second(deconvolve_third(
+        shift_time_indices_undo(P, E_all), E3, do), E2, do), E1, do)
+    return R3
+
+
 def R3_add_margin(R, E_all=((1,), (1,), (1,))):
-    tau = (int((len(E) - 1) / 2.0) for E in E_all)
+    tau = np.array([int((len(E) - 1) / 2.0) for E in E_all])
     tau3, tau2, tau1 = tau
     L3, L2, L1 = R.shape
 

@@ -38,11 +38,21 @@ class TestTrivialPulses2(TrivialPulseTests):
         self.A = (1 + np.arange(4 * 5 * 6)).reshape((4, 5, 6))
 
 
-def test_shift_all():
+def test_shift_time_indices():
     A = (1 + np.arange(2 * 4 * 6)).reshape((2, 4, 6))
-    B = convolve.shift_all(A, trim=False)
+    B = convolve.shift_time_indices(A, trim=False)
     C = np.zeros_like(A)
     for i, j, k in product(*map(xrange, A.shape)):
         if (i + j) < A.shape[1] and (i + j + k) < A.shape[2]:
             C[i, j, k] = A[i, i + j, i + j + k]
     assert_equal(B, C)
+
+
+def test_shift_time_indices_undo():
+    A = (1 + np.arange(2 * 4 * 6)).reshape((2, 4, 6))
+    B = convolve.shift_time_indices(A, trim=True, include_margin=True)
+    Aprime = convolve.shift_time_indices_undo(B)
+    nz = Aprime > 0
+    assert_equal(A[nz], Aprime[nz])
+    for element in Aprime[~nz]:
+        assert element == 0
