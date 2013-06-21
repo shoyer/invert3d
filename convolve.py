@@ -1,11 +1,11 @@
 import numpy as np
-from numpy.fft import fft2, fftshift, ifftshift, fftfreq
 
-from utils import MetaArray
+from utils import MetaArray, end
 
 
-def convolution_operator(pulse_vec, signal_len, direct_dot_product=True):
-    pulse_vec = np.asanyarray(pulse_vec)
+def convolution_operator(pulse_vec, signal_len, trim_left_boundary=True,
+                         trim_right_boundary=True):
+    pulse_vec = np.asanyarray(pulse_vec[:])
     if (len(pulse_vec) % 2) == 0:
         raise ValueError('pulse_vec should have odd length (since the center '
                          'of each pulse is assumed to be in the middle)')
@@ -14,293 +14,143 @@ def convolution_operator(pulse_vec, signal_len, direct_dot_product=True):
                  dtype=pulse_vec.dtype)
     for i in xrange(signal_len):
         C[i:(len(pulse_vec) + i), i] = pulse_vec
+    if trim_left_boundary:
+        C = C[(len(pulse_vec) - 1):, :]
+    if trim_right_boundary:
+        C = C[:(1 - len(pulse_vec) if len(pulse_vec) > 1 else None), :]
     return C
 
 
-def convolve_first(R, E1=(1,)):
-    """
-    Integrate over t1
-    """
-    dL = len(E1) - 1
-    L3, L2, L1 = R.shape
-    S1 = np.zeros((L3, L2, L1 + L2 + L3 + dL), dtype=R.dtype)
-    A = convolution_operator(E1, L1)
-    for t3 in xrange(L3):
-        for t2 in xrange(L2):
-            S1[t3, t2, (t3 + t2):(t3 + t2 + L1 + dL)] = A.dot(R[t3, t2, :])
-    return S1
+def loop_matvec(R, (matrix, to_shape, slice_map)):
+    """Apply matrix.dot to many independent slices of R"""
+    S = np.zeros(to_shape, dtype=R.dtype)
+    for slice_to, slice_from in slice_map:
+        S[slice_to] = matrix.dot(R[slice_from])
+    return S
 
 
-def deconvolve_first(S1, E1=(1,), deconvolution_operator=None):
-    """
-    Deconvolve over t1
-    """
-    dL = len(E1) - 1
-    L3, L2, L1 = S1.shape
-    R = np.zeros((L3, L2, L1 - L2 - L3 - dL), dtype=S1.dtype)
-    Ainv = deconvolution_operator(E1, L1 - dL)
-    for t3 in xrange(L3):
-        for t2 in xrange(L2):
-            R[t3, t2, :] = Ainv.dot(S1[t3, t2, (t3 + t2):(t3 + t2 + L1 + dL)])
-    return R
+def convolution_parameters((L3, L2, L1), (E3, E2, E1)):
+    conv_matrices = [convolution_operator(E1, L1),
+                     convolution_operator(E2, L2),
+                     convolution_operator(E3, L3, trim_left_boundary=False)]
+    d1, d2, d3 = (len(conv_matrices[i]) for i in xrange(3))
+    M1 = L3 + L2 + d1
+    M2 = L3 + d2
+    M3 = d3
+    shapes = [(L3, L2, L1), (L3, L2, M1), (L3, M2, M1), (M3, M2, M1)]
+    slice_maps = [[((t3, t2, slice(t3 + t2, t3 + t2 + d1)), (t3, t2))
+                   for t3 in xrange(L3) for t2 in xrange(L2)],
+                  [((t3, slice(t3, t3 + d2), sum12), (t3, slice(None), sum12))
+                   for t3 in xrange(L3) for sum12 in xrange(M1)],
+                  [((slice(None), sum23, sum123), (slice(None), sum23, sum123))
+                   for sum23 in xrange(M2) for sum123 in xrange(M1)]]
+    return conv_matrices, shapes, slice_maps
 
 
-def convolve_second(S1, E2=(1,)):
-    """
-    Integrate over t2
-    """
-    dL = len(E2) - 1
-    L3, L2, L1 = S1.shape
-    S2 = np.zeros((L3, L2 + L3 + dL, L1), dtype=S1.dtype)
-    A = convolution_operator(E2, L2)
-    for t3 in xrange(L3):
-        for sum12 in xrange(L1):
-            S2[t3, t3:(t3 + L2 + dL), sum12] = A.dot(S1[t3, :, sum12])
-    return S2
+def R3_to_P3(R3, E_all, shortcut=False):
+    conv_mat, shapes, slice_maps = convolution_parameters(R3.shape, E_all)
+    S3 = reduce(loop_matvec, zip(conv_mat, shapes[1:], slice_maps), R3)
+    if shortcut:
+        return S3
+    P3 = P3_resize(shift_time_indices(S3, E_all), E_all)
+
+    try:
+        return MetaArray(P3, ticks=resize_ticks(R3.ticks, E_all),
+                         rw_freq=R3.rw_freq)
+    except AttributeError:
+        return P3
 
 
-def deconvolve_second(S2, E2=(1,), deconvolution_operator=None):
-    """
-    Deconvolve over t2
-    """
-    dL = len(E2) - 1
-    L3, L2, L1 = S2.shape
-    S1 = np.zeros((L3, L2 - L3 - dL, L1), dtype=S2.dtype)
-    Ainv = deconvolution_operator(E2, L2 - dL)
-    for t3 in xrange(L3):
-        for sum12 in xrange(L1):
-            S1[t3, :, sum12] = Ainv.dot(S2[t3, t3:(t3 + L2 + dL), sum12])
-    return S1
+def R3_resize(R3, E_all):
+    E3, E2, E1 = E_all
+    R3_new = np.zeros(resized_shape(R3.shape, E_all), dtype=R3.dtype)
+    R3_new[-(R3.shape[0] - E3.center):, :, :] = \
+        R3[:end(E3.center),
+           (E2.center + E3.center):end(E2.center),
+           E1.center:end(E1.center)]
+    try:
+        return MetaArray(R3_new, ticks=resize_ticks(R3.ticks, E_all),
+                         rw_freq=R3.rw_freq)
+    except AttributeError:
+        return R3_new
 
 
-def convolve_third(S2, E3=(1,)):
-    """
-    Integrate over t3
-    """
-    dL = len(E3) - 1
-    L3, L2, L1 = S2.shape
-    S3 = np.zeros((L3 + dL, L2, L1), dtype=S2.dtype)
-    A = convolution_operator(E3, L3)
-    for sum23 in xrange(L2):
-        for T1 in xrange(L1):
-            S3[:, sum23, T1] = A.dot(S2[:, sum23, T1])
-    return S3
+def P3_resize(P3, E_all):
+    E3 = E_all[0]
+    R3_shape = S3_shape_to_R3_shape(P3.shape, E_all)
+    P3_new = np.zeros(resized_shape(R3_shape, E_all), dtype=P3.dtype)
+    P3_new[-P3.shape[0]:, :, :] = P3[:, E3.center:(P3_new.shape[1] + E3.center),
+                                     :P3_new.shape[2]]
+    return P3_new
 
 
-def deconvolve_third(S3, E3=(1,), deconvolution_operator=None):
-    """
-    Deconvolve over t3
-    """
-    dL = len(E3) - 1
-    L3, L2, L1 = S3.shape
-    S2 = np.zeros((L3 - dL, L2, L1), dtype=S3.dtype)
-    Ainv = deconvolution_operator(E3, L3 - dL)
-    for sum23 in xrange(L2):
-        for T1 in xrange(L1):
-            S2[:, sum23, T1] = Ainv.dot(S3[:, sum23, T1])
-    return S2
+def P3_unsize(P3, R3_shape, E_all, fill=0):
+    E3 = E_all[0]
+    _, shapes, _ = convolution_parameters(R3_shape, E_all)
+    P3_old = np.empty(shapes[-1], dtype=P3.dtype)
+    P3_old[:] = fill
+    P3_old[:, E3.center:(P3.shape[1] + E3.center),
+           :P3.shape[2]] = P3[-P3_old.shape[0]:, :, :]
+    return P3_old
 
 
-def shift_time_indices(S3, E_all=((1,), (1,), (1,)), trim=True,
-                       include_margin=True):
+def shift_time_indices(S3, (E3, E2, _)):
     """
     Shift indices from (T3, T3 + T2, T3 + T2 + T1) to (T3, T2, T1)
     """
     P3 = S3.copy()
-
-    E3, E2, E1 = E_all
-    L3 = P3.shape[0] - len(E3) + 1
-    L2 = P3.shape[1] - L3 - len(E2) + 1
-    L1 = P3.shape[2] - L3 - L2 - len(E1) + 1
-
-    tau3, tau2, tau1 = (int((len(E) - 1) / 2.0) for E in E_all)
-
     for T3 in xrange(S3.shape[0]):
-        P3[T3, :, :] = np.roll(P3[T3, :, :], -T3 + tau3, axis=0)
-        P3[T3, :, :] = np.roll(P3[T3, :, :], -T3 + tau3, axis=1)
-        if T3 > tau3:
-            P3[T3, (-T3 + tau3):, :] = 0
-            P3[T3, :, (-T3 + tau3):] = 0
-
+        P3[T3, :, :] = np.roll(P3[T3, :, :], -T3 + E3.center, axis=0)
+        P3[T3, :, :] = np.roll(P3[T3, :, :], -T3 + E3.center, axis=1)
     for T2 in xrange(S3.shape[1]):
-        P3[:, T2, :] = np.roll(P3[:, T2, :], -T2 + tau2, axis=1)
-        if T2 > tau2:
-            P3[:, T2, (-T2 + tau2):] = 0
-
-    if trim:
-        if include_margin:
-            P3 = P3[:(L3 + len(E3) - 1),
-                    :(L2 + len(E2) - 1),
-                    :(L1 + len(E1) - 1)]
-        else:
-            P3 = P3[tau3:(L3 + tau3),
-                    tau2:(L2 + tau2),
-                    tau1:(L1 + tau1)]
+        P3[:, T2, :] = np.roll(P3[:, T2, :], -T2 - E2.center, axis=1)
     return P3
 
 
 
-def shift_time_indices_undo(P3, E_all=((1,), (1,), (1,)), trim=True,
-                            include_margin=True):
+def unshift_time_indices(P3, (E3, E2, _)):
     """
     Shift from indices (T3, T2, T1) to (T3, T3 + T2, T3 + T2 + T1)
 
     Assumes input from shift_time_indices(trim=True, include_margin=True)
     """
-    E3, E2, E1 = E_all
-    L3, L2, L1 = (d - len(E) + 1 for E, d in zip(E_all, P3.shape))
-
-    S3 = np.zeros((L3 + len(E3) - 1,
-                   L3 + L2 + len(E3) - 1,
-                   L3 + L1 + L1 + len(E1) - 1),
-                  dtype=P3.dtype)
-    S3[:(L3 + len(E3) - 1),
-       :(L2 + len(E2) - 1),
-       :(L1 + len(E1) - 1)] = P3
-
-    tau3, tau2, _ = (int((len(E) - 1) / 2.0) for E in E_all)
-
+    S3 = P3.copy()
     for T2 in xrange(S3.shape[1]):
-        S3[:, T2, :] = np.roll(S3[:, T2, :], T2 - tau2, axis=1)
+        S3[:, T2, :] = np.roll(S3[:, T2, :], T2 + E2.center, axis=1)
     for T3 in xrange(S3.shape[0]):
-        S3[T3, :, :] = np.roll(S3[T3, :, :], T3 - tau3, axis=0)
-        S3[T3, :, :] = np.roll(S3[T3, :, :], T3 - tau3, axis=1)
+        S3[T3, :, :] = np.roll(S3[T3, :, :], T3 - E3.center, axis=0)
+        S3[T3, :, :] = np.roll(S3[T3, :, :], T3 - E2.center, axis=1)
     return S3
 
 
-def expand_ticks(R, E_all=((1,), (1,), (1,))):
-    ticks_new = []
-    for t, Ei in zip(R.ticks, E_all):
-        dt = t[1] - t[0]
-        dL = int((len(Ei) - 1) / 2.0)
-        t_before = t[0] - dt * np.arange(1, dL + 1)[::-1]
-        t_after = t[-1] + dt * np.arange(1, dL + 1)
-        ticks_new.append(np.concatenate((t_before, t, t_after)))
-    return tuple(ticks_new)
+
+def resize_ticks((ticks3, ticks2, ticks1), (E3, E2, E1)):
+    return (np.append(-ticks3[:end(E3.center)][:0:-1], ticks3[:end(E3.center)]),
+            ticks2[(E2.center + E3.center):end(E2.center)],
+            ticks1[E1.center:end(E1.center)])
+
+
+def S3_shape_to_R3_shape((M3, M2, M1), (E3, E2, E1)):
+    L3 = M3
+    L2 = M2 - L3 + 2 * E2.center
+    L1 = M1 - L3 - L2 + 2 * E1.center
+    return (L3, L2, L1)
+
+
+def resized_shape((L3, L2, L1), (E3, E2, E1)):
+    return (2 * L3 - 2 * E3.center - 1,
+            L2 - 2 * E2.center - E3.center,
+            L1 - 2 * E1.center)
 
 
 
-def R3_to_P3(R, E_all=((1,), (1,), (1,)), trim=True, include_margin=True):
-    E3, E2, E1 = E_all
-    P3 = shift_time_indices(
-        convolve_third(convolve_second(convolve_first(R, E1), E2), E3),
-        E_all, trim, include_margin)
-    try:
-        return MetaArray(P3, ticks=expand_ticks(R, E_all), rw_freq=R.rw_freq)
-    except AttributeError:
-        return P3
 
-
-def P3_to_R3(P, E_all=((1,), (1,), (1,)), deconvolution_operator=None):
-    E3, E2, E1 = E_all
-    do = deconvolution_operator
-    R3 = deconvolve_first(deconvolve_second(deconvolve_third(
-        shift_time_indices_undo(P, E_all), E3, do), E2, do), E1, do)
-    return R3
-
-
-def R3_add_margin(R, E_all=((1,), (1,), (1,))):
-    tau = np.array([int((len(E) - 1) / 2.0) for E in E_all])
-    tau3, tau2, tau1 = tau
-    L3, L2, L1 = R.shape
-
-    R_new = np.zeros(tuple(np.array(R.shape) + tau), dtype=R.dtype)
-    R_new[tau3:(L3 + tau3), tau2:(L2 + tau2), tau1:(L1 + tau1)] = R
-
-    try:
-        return MetaArray(R_new, ticks=expand_ticks(R, E_all), rw_freq=R.rw_freq)
-    except AttributeError:
-        return R_new
-
-
-
-def trim_pulse_overlap(R, E_all=((1,), (1,), (1,))):
-    # Not quite right?
-    start = len(E_all[0]) + len(E_all[1])
-    end = None
-
-    R_new = R[:, start:end, :]
-    ticks_new = (R.ticks[0], R.ticks[1][start:end], R.ticks[2])
-    return MetaArray(R_new, ticks=ticks_new, rw_freq=R.rw_freq)
-
-
-def select_NR(R_old):
-    R = R_old.copy()
-    x = (R.shape[2] - 1) / 2
-    R[:, :, :x] = 0
-    R[:, :, x] /= 2
-    return R
-
-
-def select_PE(R_old):
-    R = R_old.copy()
-    x = (R.shape[2] - 1) / 2
-    R[:, :, -x:] = 0
-    R[:, :, x] /= 2
-    return R
-
-
-def combine_NR_PE(R_NR, R_PE, add_t3_negative=True):
-    if add_t3_negative:
-        pad_t3 = R_NR.shape[0] - 1
-    else:
-        pad_t3 = 0
-
-    x3, x2, x1 = R_NR.shape
-    y3, y2, y1 = R_PE.shape
-    if (x3 != y3) or (x2 != y2):
-        raise ValueError('Mismatched t3 or t2')
-
-    R_c = np.zeros((x3 + pad_t3, x2, x1 + y1 - 1), dtype=R_NR.dtype)
-    R_c[pad_t3:, :, :(x1-1)] = R_NR[:, :, :0:-1]
-    R_c[pad_t3:, :, x1:] = R_PE[:, :, 1:]
-    R_c[pad_t3:, :, (x1-1)] = (R_PE[:, :, 0] + R_NR[:, :, 0])/2.0
-
-    t3 = np.concatenate((-R_NR.ticks[0][pad_t3:0:-1], R_NR.ticks[0]))
-    t2 = R_NR.ticks[1]
-    t1 = np.concatenate((-R_NR.ticks[2][:0:-1], R_PE.ticks[2]))
-
-    return MetaArray(R_c, ticks=(t3, t2, t1), rw_freq=R_NR.rw_freq)
-
-
-def reweight_R3(R, freq_weights):
-    if np.array(freq_weights).ndim == 1:
-        freq_weights = [freq_weights, freq_weights, freq_weights]
-    return (R * freq_weights[0].reshape(-1, 1, 1)
-            * (freq_weights[1] * freq_weights[2]).reshape(1, 1, -1))
-
-
-def fft_2D(R, convert=3e-5, freq_bounds=None):
-    """
-    Perform a 2D FFT to transform a 3rd order response function defined in the
-    rotating frame into a series of 2D spectra.
-
-    First argument must be a MetaArray object wth ticks and rw_freq defined.
-
-    Returns the FFT in another MetaArray object with ticks updated to the
-    calculated frequencies (converted using the convert argument which defaults
-    to cm to fs).
-    """
-
-    # reverses frequency order to keep convention e^{+i \omega t}
-    R_2D = fftshift(fft2(ifftshift(R, axes=(0, 2)), axes=(0, 2)),
-                    axes=(0, 2))[::-1, :, ::-1]
-
-    dt = [t[1] - t[0] for t in R.ticks]
-
-    freqs = [fftshift(fftfreq(R.shape[axis], dt[axis] * convert))
-             + R.rw_freq for axis in (0, 2)]
-
-    if freq_bounds is not None:
-        bounds = [bound_indices(ticks, freq_bounds) for ticks in freqs]
-        freqs = [freq[bound[0]:bound[1]] for freq, bound in zip(freqs, bounds)]
-        R_2D = R_2D[bounds[0][0]:bounds[0][1], :, bounds[1][0]:bounds[1][1]]
-
-    return MetaArray(R_2D, ticks=(freqs[0], R.ticks[1], freqs[1]))
-
-
-def bound_indices(ticks, bounds):
-    i0 = np.argmin(np.abs(ticks - bounds[0]))
-    i1 = np.argmin(np.abs(ticks - bounds[1]))
-    return (min(i0, i1), max(i0, i1) + 1)
-
+class ControlField(object):
+    def __init__(self, pulse_vec, center=None):
+        self.vec = pulse_vec
+        self.center = (int((len(self) - 1) / 2.0)
+                       if center is None else center)
+    def __getitem__(self, item):
+        return self.vec[item]
+    def __len__(self):
+        return len(self.vec)

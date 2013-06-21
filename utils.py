@@ -1,6 +1,10 @@
 import numpy as np
 
 
+def end(n):
+    return -n if n != 0 else None
+
+
 class MetaArray(np.ndarray):
     """
     Subclass of numpy.ndarray which stores metadata supplied as named arguments
@@ -51,15 +55,12 @@ class MetaArray(np.ndarray):
     def __repr__(self):
         metadata_str = ''.join(', {0}={1}'.format(k, v)
                                for k, v in self.metadata.iteritems())
-        return '{0}({1}{2})'.format(type(self).__name__,
-                                    np.ndarray.__repr__(self),
-                                    metadata_str)
+        return np.ndarray.__repr__(self)[:-1] + metadata_str + ')'
 
     def __reduce__(self):
         """Used by pickle"""
         state = np.ndarray.__reduce__(self)
-        state[2] = (state[2], self.metadata)
-        return tuple(state)
+        return (state[0], state[1], (state[2], self.metadata))
 
     def __setstate__(self, (array_state, metadata)):
         """Used by pickle"""
