@@ -129,7 +129,7 @@ def convolution_parameters((L3, L2, L1), E_all=((1,), (1,), (1,))):
     return conv_matrices, shapes, slice_maps
 
 def R3_add_margin(R, E_all=((1,), (1,), (1,))):
-    tau = np.array(2[int((len(E) - 1) / 2.0) for E in E_all])
+    tau = np.array([int((len(E) - 1) / 2.0) for E in E_all])
     tau3, tau2, tau1 = tau
     L3, L2, L1 = R.shape
 

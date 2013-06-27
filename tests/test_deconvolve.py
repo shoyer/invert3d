@@ -1,7 +1,7 @@
 import numpy as np
 from numpy.testing import assert_equal
 
-from invert3des import convolve_legacy as convolve, deconvolve
+from invert3d import convolve_legacy as convolve, deconvolve
 
 
 def test_shift_time_indices_undo():

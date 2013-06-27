@@ -2,7 +2,7 @@ import numpy as np
 from itertools import product
 from numpy.testing import assert_equal
 
-from invert3des import convolve_legacy as convolve
+from invert3d import convolve_legacy as convolve
 
 
 class TrivialPulseTests(object):

@@ -63,3 +63,8 @@ P_NR_2D_w = reweight_R3(R_NR_2D, freq_weights)
 alpha, beta = np.argmin(np.abs(R_2D.ticks[0].reshape(1, -1)
 							   - hamiltonian.system.E('e').reshape(-1, 1)), 1)
 
+
+S3_forward_ones = R3_to_P3(np.ones_like(R_c), E_all, shortcut=True)
+S3_backward_ones = unshift_time_indices(
+    P3_unsize(np.ones_like(P3), R_c.shape, E_all), E_all)
+
